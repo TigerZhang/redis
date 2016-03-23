@@ -155,12 +155,45 @@ robj *dbRandomKey(redisDb *db) {
     }
 }
 
+robj *dbRandomEvictedKey(redisDb *db) {
+    struct dictEntry *de;
+
+    while(1) {
+        sds key;
+        robj *keyobj;
+
+        de = dictGetRandomKey(db->evicted);
+        if (de == NULL) return NULL;
+
+        key = dictGetKey(de);
+        keyobj = createStringObject(key,sdslen(key));
+        return keyobj;
+    }
+}
+
+
 /* Delete a key, value, and associated expiration entry if any, from the DB */
 int dbDelete(redisDb *db, robj *key) {
     /* Deleting an entry from the expires dict will not free the sds of
      * the key, because it is shared with the main dictionary. */
     if (dictSize(db->expires) > 0) dictDelete(db->expires,key->ptr);
     if (dictDelete(db->dict,key->ptr) == DICT_OK) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+/* Evict a key
+ * 1. Add the key to db->evicted
+ * 2. Delete the key and associated expiration entry
+ */
+int dbEvict(redisDb *db, robj *key) {
+    sds keyEvict = sdsdup(key->ptr);
+
+    dictAdd(db->evicted, keyEvict, NULL);
+    if (dictSize(db->expires) > 0) dictDelete(db->expires, key->ptr);
+    if (dictDelete(db->dict, key->ptr) == DICT_OK) {
         return 1;
     } else {
         return 0;
@@ -901,6 +934,18 @@ void expireGenericCommand(redisClient *c, long long basetime, int unit) {
 
 void expireCommand(redisClient *c) {
     expireGenericCommand(c,mstime(),UNIT_SECONDS);
+}
+
+void evictedCommand(redisClient *c) {
+    robj *key;
+
+    if ((key = dbRandomEvictedKey(c->db)) == NULL) {
+        addReply(c,shared.nullbulk);
+        return;
+    }
+
+    addReplyBulk(c,key);
+    decrRefCount(key);
 }
 
 void expireatCommand(redisClient *c) {
