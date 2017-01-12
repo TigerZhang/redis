@@ -463,7 +463,7 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
             luaPushError(lua,"Unknown Redis command called from Lua script");
         goto cleanup;
     }
-    c->cmd = cmd;
+    c->cmd = c->lastcmd = cmd;
 
     /* There are commands that are not allowed inside scripts. */
     if (cmd->flags & CMD_NOSCRIPT) {
@@ -512,8 +512,10 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
 
     /* If this is a Redis Cluster node, we need to make sure Lua is not
      * trying to access non-local keys, with the exception of commands
-     * received from our master. */
-    if (server.cluster_enabled && !(server.lua_caller->flags & CLIENT_MASTER)) {
+     * received from our master or when loading the AOF back in memory. */
+    if (server.cluster_enabled && !server.loading &&
+        !(server.lua_caller->flags & CLIENT_MASTER))
+    {
         /* Duplicate relevant flags in the lua client. */
         c->flags &= ~(CLIENT_READONLY|CLIENT_ASKING);
         c->flags |= server.lua_caller->flags & (CLIENT_READONLY|CLIENT_ASKING);
@@ -837,6 +839,8 @@ void luaLoadLibraries(lua_State *lua) {
 void luaRemoveUnsupportedFunctions(lua_State *lua) {
     lua_pushnil(lua);
     lua_setglobal(lua,"loadfile");
+    lua_pushnil(lua);
+    lua_setglobal(lua,"dofile");
 }
 
 /* This function installs metamethods in the global table _G that prevent
@@ -1145,7 +1149,7 @@ int luaCreateFunction(client *c, lua_State *lua, char *funcname, robj *body) {
     funcdef = sdscatlen(funcdef,funcname,42);
     funcdef = sdscatlen(funcdef,"() ",3);
     funcdef = sdscatlen(funcdef,body->ptr,sdslen(body->ptr));
-    funcdef = sdscatlen(funcdef," end",4);
+    funcdef = sdscatlen(funcdef,"\nend",4);
 
     if (luaL_loadbuffer(lua,funcdef,sdslen(funcdef),"@user_script")) {
         addReplyErrorFormat(c,"Error compiling script (new function): %s\n",
@@ -1846,8 +1850,12 @@ void ldbList(int around, int context) {
  *
  * The element is not automatically removed from the stack, nor it is
  * converted to a different type. */
-sds ldbCatStackValue(sds s, lua_State *lua, int idx) {
+#define LDB_MAX_VALUES_DEPTH (LUA_MINSTACK/2)
+sds ldbCatStackValueRec(sds s, lua_State *lua, int idx, int level) {
     int t = lua_type(lua,idx);
+
+    if (level++ == LDB_MAX_VALUES_DEPTH)
+        return sdscat(s,"<max recursion level reached! Nested table?>");
 
     switch(t) {
     case LUA_TSTRING:
@@ -1883,13 +1891,13 @@ sds ldbCatStackValue(sds s, lua_State *lua, int idx) {
                  lua_tonumber(lua,-2) != expected_index)) is_array = 0;
             /* Stack now: table, key, value */
             /* Array repr. */
-            repr1 = ldbCatStackValue(repr1,lua,-1);
+            repr1 = ldbCatStackValueRec(repr1,lua,-1,level);
             repr1 = sdscatlen(repr1,"; ",2);
             /* Full repr. */
             repr2 = sdscatlen(repr2,"[",1);
-            repr2 = ldbCatStackValue(repr2,lua,-2);
+            repr2 = ldbCatStackValueRec(repr2,lua,-2,level);
             repr2 = sdscatlen(repr2,"]=",2);
-            repr2 = ldbCatStackValue(repr2,lua,-1);
+            repr2 = ldbCatStackValueRec(repr2,lua,-1,level);
             repr2 = sdscatlen(repr2,"; ",2);
             lua_pop(lua,1); /* Stack: table, key. Ready for next iteration. */
             expected_index++;
@@ -1924,6 +1932,12 @@ sds ldbCatStackValue(sds s, lua_State *lua, int idx) {
         break;
     }
     return s;
+}
+
+/* Higher level wrapper for ldbCatStackValueRec() that just uses an initial
+ * recursion level of '0'. */
+sds ldbCatStackValue(sds s, lua_State *lua, int idx) {
+    return ldbCatStackValueRec(s,lua,idx,0);
 }
 
 /* Produce a debugger log entry representing the value of the Lua object
