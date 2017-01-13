@@ -274,6 +274,19 @@ void debugCommand(redisClient *c) {
         }
         redisLog(REDIS_WARNING,"DB reloaded by DEBUG RELOAD");
         addReply(c,shared.ok);
+    } else if (!strcasecmp(c->argv[1]->ptr,"reloadrdbfrom")) {
+        if (c->argc != 3) {
+            addReply(c, shared.syntaxerr);
+            return;
+        }
+        /* check rdb file */
+        emptyDb(NULL);
+        if (rdbLoad(c->argv[2]->ptr) != REDIS_OK) {
+            addReplyError(c, "Error trying to load the RDB file");
+            return;
+        }
+        redisLog(REDIS_WARNING, "DB reloaded by DEBUG RELOADRDBFROM");
+        addReply(c, shared.ok);
     } else if (!strcasecmp(c->argv[1]->ptr,"loadaof")) {
         emptyDb(NULL);
         if (loadAppendOnlyFile(server.aof_filename) != REDIS_OK) {
